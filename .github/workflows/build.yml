@@ -1,0 +1,137 @@
+name: Build V8 (Fuzzilli config) + Fuzzilli → GHCR
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write   # required for GHCR
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/v8-fuzzilli
+  IMAGE_TAG: latest
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      # -------------------------------------------------
+      # Base system dependencies
+      # -------------------------------------------------
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl python3 python3-pip \
+            build-essential ninja-build \
+            clang lld pkg-config \
+            ca-certificates
+
+      # -------------------------------------------------
+      # Install Swift (official Swiftly method)
+      # -------------------------------------------------
+      - name: Install Swift (Swiftly)
+        run: |
+          curl -O https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz
+          tar zxf swiftly-$(uname -m).tar.gz
+          ./swiftly init --quiet-shell-followup
+          . "${SWIFTLY_HOME_DIR:-$HOME/.local/share/swiftly}/env.sh"
+          hash -r
+          swift --version
+
+      # -------------------------------------------------
+      # depot_tools (required for V8)
+      # -------------------------------------------------
+      - name: Install depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$PWD/depot_tools" >> $GITHUB_PATH
+
+      # -------------------------------------------------
+      # Fetch V8
+      # -------------------------------------------------
+      - name: Fetch V8
+        run: |
+          fetch v8
+          cd v8
+          git checkout main
+          gclient sync
+
+      # -------------------------------------------------
+      # Build V8 EXACTLY like Fuzzilli recommends
+      # -------------------------------------------------
+      - name: Build V8 (Fuzzilli fuzzbuild)
+        run: |
+          cd v8
+          gn gen out/fuzzbuild --args='
+            is_debug=false
+            dcheck_always_on=true
+            v8_static_library=true
+            v8_enable_verify_heap=true
+            v8_enable_partition_alloc=false
+            v8_fuzzilli=true
+            sanitizer_coverage_flags="trace-pc-guard"
+            target_cpu="x64"
+          '
+          ninja -C out/fuzzbuild d8
+
+      # -------------------------------------------------
+      # Fetch & build Fuzzilli
+      # -------------------------------------------------
+      - name: Clone Fuzzilli
+        run: |
+          git clone https://github.com/googleprojectzero/fuzzilli.git
+
+      - name: Build Fuzzilli
+        run: |
+          cd fuzzilli
+          swift build -c release
+
+      # -------------------------------------------------
+      # Prepare Docker context (generated on the fly)
+      # -------------------------------------------------
+      - name: Prepare Docker image
+        run: |
+          mkdir docker
+          cp v8/out/fuzzbuild/d8 docker/
+          cp fuzzilli/.build/release/Fuzzilli docker/
+
+          cat > docker/Dockerfile << 'EOF'
+          FROM ubuntu:22.04
+
+          RUN apt-get update && apt-get install -y \
+              clang libstdc++6 libgcc-s1 \
+              && rm -rf /var/lib/apt/lists/*
+
+          WORKDIR /opt/fuzzing
+
+          COPY d8 /opt/fuzzing/d8
+          COPY Fuzzilli /opt/fuzzing/Fuzzilli
+
+          RUN chmod +x d8 Fuzzilli
+
+          ENV PATH="/opt/fuzzing:${PATH}"
+
+          ENTRYPOINT ["./Fuzzilli"]
+          EOF
+
+      # -------------------------------------------------
+      # Build & push to GHCR (no credentials needed)
+      # -------------------------------------------------
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker image
+        run: |
+          docker build docker -t $IMAGE_NAME:$IMAGE_TAG
+
+      - name: Push Docker image
+        run: |
+          docker push $IMAGE_NAME:$IMAGE_TAG
