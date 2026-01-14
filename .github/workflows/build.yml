@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: read
-  packages: write   # required for GHCR
+  packages: write
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/v8-fuzzilli
@@ -20,10 +20,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: Free disk before build
+      - name: Free disk space before build
         run: |
           sudo apt-get clean
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
@@ -31,7 +29,7 @@ jobs:
           rm -rf $HOME/.cache/*
           df -h
 
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -39,8 +37,7 @@ jobs:
             build-essential ninja-build \
             clang lld pkg-config ca-certificates
 
-      # --- Swift installation (for Fuzzilli) ---
-      - name: Install Swift (Swiftly)
+      - name: Install Swift via Swiftly
         run: |
           curl -O https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz
           tar zxf swiftly-$(uname -m).tar.gz
@@ -49,7 +46,6 @@ jobs:
           hash -r
           swift --version
 
-      # --- depot_tools and V8 ---
       - name: Install depot_tools
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
@@ -73,16 +69,13 @@ jobs:
           '
           ninja -C out/fuzzbuild d8
 
-      # --- Save d8 and delete all V8 source to free disk ---
-      - name: Save d8 binary and delete V8 source
+      - name: Save d8 and delete V8 to free space
         run: |
           mkdir -p build-out
           cp v8/out/fuzzbuild/d8 build-out/
           rm -rf v8
-          echo "Disk usage after V8 cleanup:"
           df -h
 
-      # --- Clone and build Fuzzilli ---
       - name: Cache SwiftPM build dirs
         uses: actions/cache@v4
         with:
@@ -94,30 +87,26 @@ jobs:
             ${{ runner.os }}-swiftpm-
 
       - name: Clone Fuzzilli
-        run: |
-          git clone https://github.com/googleprojectzero/fuzzilli.git
+        run: git clone https://github.com/googleprojectzero/fuzzilli.git
 
-      - name: Build Fuzzilli
+      - name: Build all Fuzzilli products
         run: |
           cd fuzzilli
           swift build -c release
 
-      - name: Copy Fuzzilli binary
+      - name: Copy FuzzilliCli binary
         run: |
-          cp fuzzilli/.build/release/Fuzzilli build-out/
+          cp fuzzilli/.build/release/FuzzilliCli build-out/Fuzzilli
 
-      # --- Docker build and GHCR push ---
       - name: Write Dockerfile
         run: |
           mkdir docker
           mv build-out/* docker/
           cat > docker/Dockerfile << 'EOF'
           FROM ubuntu:22.04
-
           RUN apt-get update && apt-get install -y \
               clang libstdc++6 libgcc-s1 \
               && rm -rf /var/lib/apt/lists/*
-
           WORKDIR /opt/fuzzing
           COPY d8 /opt/fuzzing/d8
           COPY Fuzzilli /opt/fuzzing/Fuzzilli
@@ -137,6 +126,6 @@ jobs:
         run: |
           docker build docker -t $IMAGE_NAME:$IMAGE_TAG
 
-      - name: Push Docker image to GHCR
+      - name: Push image to GHCR
         run: |
           docker push $IMAGE_NAME:$IMAGE_TAG
