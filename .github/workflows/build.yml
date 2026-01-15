@@ -10,12 +10,12 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/v8-fuzzilli
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/v8-fuzz
   IMAGE_TAG: latest
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
